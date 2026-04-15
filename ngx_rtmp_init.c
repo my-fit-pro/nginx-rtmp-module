@@ -8,6 +8,7 @@
 #include <ngx_core.h>
 #include "ngx_rtmp.h"
 #include "ngx_rtmp_proxy_protocol.h"
+#include "ngx_rtmp_ssl_module.h"
 
 
 static void ngx_rtmp_close_connection(ngx_connection_t *c);
@@ -136,7 +137,12 @@ ngx_rtmp_init_connection(ngx_connection_t *c)
         ngx_rtmp_proxy_protocol(s);
 
     } else {
-        ngx_rtmp_handshake(s);
+#if (NGX_RTMP_SSL)
+        if (s->ssl)
+            ngx_rtmp_ssl(s);
+        else
+#endif
+            ngx_rtmp_handshake(s);
     }
 }
 
@@ -159,6 +165,10 @@ ngx_rtmp_init_session(ngx_connection_t *c, ngx_rtmp_addr_conf_t *addr_conf)
 
     s->main_conf = addr_conf->ctx->main_conf;
     s->srv_conf = addr_conf->ctx->srv_conf;
+
+#if (NGX_RTMP_SSL)
+    s->ssl = addr_conf->ssl;
+#endif
 
     s->addr_text = &addr_conf->addr_text;
 
@@ -257,6 +267,15 @@ ngx_rtmp_close_connection(ngx_connection_t *c)
 
     ngx_log_debug0(NGX_LOG_DEBUG_RTMP, c->log, 0, "close connection");
 
+#if (NGX_RTMP_SSL)
+
+    if (c->ssl) {
+        c->ssl->no_wait_shutdown = 1;
+        (void) ngx_ssl_shutdown(c);
+    }
+
+#endif
+
 #if (NGX_STAT_STUB)
     (void) ngx_atomic_fetch_add(ngx_stat_active, -1);
 #endif
@@ -327,4 +346,3 @@ ngx_rtmp_finalize_session(ngx_rtmp_session_t *s)
 
     ngx_post_event(e, &ngx_posted_events);
 }
-

@@ -10,6 +10,9 @@
 #include <nginx.h>
 #include "ngx_rtmp.h"
 
+#if (NGX_RTMP_SSL)
+#include "ngx_rtmp_ssl_module.h"
+#endif
 
 static void *ngx_rtmp_core_create_main_conf(ngx_conf_t *cf);
 static void *ngx_rtmp_core_create_srv_conf(ngx_conf_t *cf);
@@ -23,6 +26,8 @@ static char *ngx_rtmp_core_server(ngx_conf_t *cf, ngx_command_t *cmd,
 static char *ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_rtmp_core_application(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_rtmp_core_resolver(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 
 
@@ -155,6 +160,20 @@ static ngx_command_t  ngx_rtmp_core_commands[] = {
       ngx_conf_set_msec_slot,
       NGX_RTMP_SRV_CONF_OFFSET,
       offsetof(ngx_rtmp_core_srv_conf_t, buflen),
+      NULL },
+
+    { ngx_string("resolver"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_1MORE,
+      ngx_rtmp_core_resolver,
+      NGX_RTMP_APP_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("resolver_timeout"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_msec_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_core_app_conf_t, resolver_timeout),
       NULL },
 
       ngx_null_command
@@ -308,6 +327,8 @@ ngx_rtmp_core_create_app_conf(ngx_conf_t *cf)
         return NULL;
     }
 
+    conf->resolver_timeout = NGX_CONF_UNSET_MSEC;
+
     return conf;
 }
 
@@ -318,8 +339,26 @@ ngx_rtmp_core_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_rtmp_core_app_conf_t *prev = parent;
     ngx_rtmp_core_app_conf_t *conf = child;
 
-    (void)prev;
-    (void)conf;
+    ngx_conf_merge_msec_value(conf->resolver_timeout,
+                              prev->resolver_timeout, 30000);
+
+    if (conf->resolver == NULL) {
+
+        if (prev->resolver == NULL) {
+
+            /*
+             * create dummy resolver in rtmp {} context
+             * to inherit it in all servers
+             */
+
+            prev->resolver = ngx_resolver_create(cf, NULL, 0);
+            if (prev->resolver == NULL) {
+                return NGX_CONF_ERROR;
+            }
+        }
+
+        conf->resolver = prev->resolver;
+    }
 
     return NGX_CONF_OK;
 }
@@ -641,6 +680,21 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 #endif
         }
 
+        if (ngx_strcmp(value[i].data, "ssl") == 0) {
+#if (NGX_RTMP_SSL)
+            ngx_rtmp_ssl_conf_t    *sslcf;
+
+            sslcf = ngx_rtmp_conf_get_module_srv_conf(cf, ngx_rtmp_ssl_module);
+            sslcf->listen = 1;
+            ls->ssl = 1;
+            continue;
+#else
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "the \"ssl\" parameter requires ssl support");
+            return NGX_CONF_ERROR;
+#endif
+        }
+
         if (ngx_strncmp(value[i].data, "so_keepalive=", 13) == 0) {
 
             if (ngx_strcmp(&value[i].data[13], "on") == 0) {
@@ -738,6 +792,28 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "the invalid \"%V\" parameter", &value[i]);
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+static char *
+ngx_rtmp_core_resolver(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_rtmp_core_app_conf_t  *cacf = conf;
+
+    ngx_str_t  *value;
+
+    if (cacf->resolver) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    cacf->resolver = ngx_resolver_create(cf, &value[1], cf->args->nelts - 1);
+    if (cacf->resolver == NULL) {
         return NGX_CONF_ERROR;
     }
 
